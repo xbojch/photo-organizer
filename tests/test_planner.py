@@ -404,6 +404,46 @@ def test_analyze_groups_a_single_located_day_as_yyyy_mm_dd_city(tmp_path, monkey
     assert plan[0].dest == out_dir / '2015' / '04' / '2015-04-28 Warsaw' / 'a.jpg'
 
 
+def test_analyze_excludes_a_named_location_to_the_plain_bucket(tmp_path, monkeypatch):
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
+
+    _stub_location(monkeypatch, default_gps=(52.23, 21.01))
+    monkeypatch.setattr('photo_organizer.planner.city_for', lambda lat, lon: 'Warsaw')
+
+    plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', group_by_location=True,
+                    excluded_locations=frozenset({'Warsaw'}), reporter=FakeReporter())
+
+    assert len(plan) == 1
+    assert plan[0].dest == out_dir / '2015' / '04' / 'a.jpg'
+
+
+def test_analyze_excludes_a_location_case_insensitively(tmp_path, monkeypatch):
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
+
+    _stub_location(monkeypatch, default_gps=(52.23, 21.01))
+    monkeypatch.setattr('photo_organizer.planner.city_for', lambda lat, lon: 'Warsaw')
+
+    plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', group_by_location=True,
+                    excluded_locations=frozenset({'warsaw'}), reporter=FakeReporter())
+
+    assert plan[0].dest == out_dir / '2015' / '04' / 'a.jpg'
+
+
+def test_analyze_only_excludes_the_named_location(tmp_path, monkeypatch):
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
+
+    _stub_location(monkeypatch, default_gps=(52.23, 21.01))
+    monkeypatch.setattr('photo_organizer.planner.city_for', lambda lat, lon: 'Warsaw')
+
+    plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', group_by_location=True,
+                    excluded_locations=frozenset({'Krakow'}), reporter=FakeReporter())
+
+    assert plan[0].dest == out_dir / '2015' / '04' / '2015-04-28 Warsaw' / 'a.jpg'
+
+
 def test_analyze_merges_consecutive_located_days_into_a_range_folder(tmp_path, monkeypatch):
     in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
     for day in (15, 16, 17, 18):

@@ -19,6 +19,7 @@ from . import planner
 from .dates import HAS_PIL, find_exiftool
 from .geocoding import HAS_GEOCODER
 from .models import LogTag, Operation, PlanOperation
+from .settings import Settings, parse_excluded_locations
 
 try:
     import sv_ttk
@@ -34,12 +35,19 @@ class PhotoOrganizerApp:
         root.geometry('900x720')
         root.minsize(760, 560)
 
-        self.input_dir = tk.StringVar()
-        self.output_dir = tk.StringVar()
-        self.operation = tk.StringVar(value=Operation.COPY.value)
+        saved = Settings.load()
+
+        self.input_dir = tk.StringVar(value=saved.input_dir)
+        self.output_dir = tk.StringVar(value=saved.output_dir)
+        self.operation = tk.StringVar(value=saved.operation or Operation.COPY.value)
+        # Never restored from settings -- see settings.py's module docstring:
+        # every launch starts in dry-run mode regardless of how the last
+        # session ended, so a remembered "apply for real" can't silently
+        # carry over onto a different input/output pair.
         self.dry_run = tk.BooleanVar(value=True)
-        self.group_by_location = tk.BooleanVar(value=False)
-        self.exiftool_path = tk.StringVar(value=find_exiftool())
+        self.group_by_location = tk.BooleanVar(value=saved.group_by_location)
+        self.excluded_locations = tk.StringVar(value=saved.excluded_locations)
+        self.exiftool_path = tk.StringVar(value=saved.exiftool_path or find_exiftool())
 
         self.plan: list[PlanOperation] = []
         self.log_queue: queue.Queue = queue.Queue()
@@ -48,6 +56,21 @@ class PhotoOrganizerApp:
         self._build_ui()
         self._drain_log_queue()
         self._log_startup_status()
+        root.protocol('WM_DELETE_WINDOW', self._on_close)
+
+    def _current_settings(self) -> Settings:
+        return Settings(
+            input_dir=self.input_dir.get(),
+            output_dir=self.output_dir.get(),
+            operation=self.operation.get(),
+            group_by_location=self.group_by_location.get(),
+            excluded_locations=self.excluded_locations.get(),
+            exiftool_path=self.exiftool_path.get(),
+        )
+
+    def _on_close(self):
+        self._current_settings().save()
+        self.root.destroy()
 
     # ---- UI ----
     def _build_ui(self):
@@ -73,8 +96,17 @@ class PhotoOrganizerApp:
                        '(consecutive days at the same city are merged into one range folder)',
             variable=self.group_by_location)
         chk_location.pack(anchor='w', padx=8, pady=2)
+        excl_row = ttk.Frame(opts); excl_row.pack(fill='x', padx=8, pady=(0, 2))
+        ttk.Label(excl_row, text='Exclude locations:', width=15).pack(side='left')
+        self.excluded_entry = ttk.Entry(excl_row, textvariable=self.excluded_locations)
+        self.excluded_entry.pack(side='left', fill='x', expand=True)
+        ttk.Label(opts, text='Comma-separated city names (e.g. your home town) filed under '
+                              'their date only, skipping location grouping -- for places you '
+                              'live rather than visit.',
+                  foreground='gray', wraplength=820, justify='left').pack(anchor='w', padx=8, pady=(0, 4))
         if not HAS_GEOCODER:
             chk_location.config(state='disabled')
+            self.excluded_entry.config(state='disabled')
 
         tools = ttk.LabelFrame(root, text='Tools')
         tools.pack(fill='x', **pad)
@@ -232,6 +264,7 @@ class PhotoOrganizerApp:
             messagebox.showerror('Missing', 'Please pick an output folder.'); return
         if not Path(self.input_dir.get()).is_dir():
             messagebox.showerror('Missing', 'Input folder does not exist.'); return
+        self._current_settings().save()
         self.stop_flag.clear()
         self.plan = []
         self.analyze_btn.config(state='disabled')
@@ -247,6 +280,7 @@ class PhotoOrganizerApp:
                 out_dir=Path(self.output_dir.get()).resolve(),
                 exiftool_path=self.exiftool_path.get().strip(),
                 group_by_location=self.group_by_location.get(),
+                excluded_locations=parse_excluded_locations(self.excluded_locations.get()),
                 reporter=self,
             )
             if self.dry_run.get():

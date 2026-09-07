@@ -131,6 +131,7 @@ def _plan_located(pending: list[_LocatedFile], out_dir: Path, used_dests: set[st
 
 
 def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_location: bool = False,
+            excluded_locations: frozenset[str] = frozenset(),
             reporter: ProgressReporter) -> list[PlanOperation]:
     """Scan in_dir, detect photo/video + date (+ location, if enabled),
     dedupe by hash, and build the copy/move plan. Never touches the
@@ -139,17 +140,24 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
 
     With group_by_location, a file whose GPS EXIF resolves to a city is
     deferred to _plan_located() so consecutive same-city days can be
-    merged into one range folder (see there). Files without resolvable
-    GPS go straight into the plain year/month bucket, as before.
+    merged into one range folder (see there) -- unless that city is in
+    excluded_locations (matched case-insensitively), typically the user's
+    home town: photos taken there aren't a "trip" worth its own folder, so
+    they fall straight into the plain year/month bucket instead, same as a
+    file with no resolvable GPS at all. Files without resolvable GPS go
+    straight into the plain year/month bucket, as before.
     """
     plan: list[PlanOperation] = []
     pending: list[_LocatedFile] = []  # resolved after the scan by _plan_located()
+    excluded_cf = {loc.casefold() for loc in excluded_locations}
 
     reporter.log('=' * 80, 'h')
     reporter.log(f'Input:    {in_dir}')
     reporter.log(f'Output:   {out_dir}')
     reporter.log(f'exiftool: {exiftool_path or "not found"}', 'dim')
     reporter.log(f'Group by location: {"yes" if group_by_location else "no"}', 'dim')
+    if group_by_location and excluded_locations:
+        reporter.log(f'Excluded locations: {", ".join(sorted(excluded_locations))}', 'dim')
     reporter.log('=' * 80, 'h')
 
     hash_db = HashDb(out_dir)
@@ -167,7 +175,7 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
     reporter.set_progress(0, len(files))
     used_dests: set[str] = set()
     seen_hashes = set(hash_db.data.keys())
-    total = exif_used = mtime_used = videos = duplicates = unrecognized = located = 0
+    total = exif_used = mtime_used = videos = duplicates = unrecognized = located = excluded = 0
 
     for i, f in enumerate(files, 1):
         if reporter.should_stop():
@@ -230,8 +238,12 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
                 # filesystem-illegal characters must not silently share a
                 # group (and then a folder) just because sanitize_component()
                 # happens to collapse both down to the same clean text.
-                city = sanitize_component(raw_city)
-                located += 1
+                candidate = sanitize_component(raw_city)
+                if candidate.casefold() in excluded_cf:
+                    excluded += 1
+                else:
+                    city = candidate
+                    located += 1
 
         if city:
             pending.append(_LocatedFile(file=f, dt=dt, city=city, kind=kind, digest=digest))
@@ -262,6 +274,8 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
     reporter.log(f'Photos using mtime   : {mtime_used}')
     reporter.log(f'Videos               : {videos}')
     reporter.log(f'Grouped by location  : {located}')
+    if excluded_locations:
+        reporter.log(f'Excluded (home) locs : {excluded}')
     reporter.log(f'Unrecognized         : {unrecognized}')
     reporter.log(f'Planned operations   : {len(plan)}')
     reporter.log('====================================', 'h')
