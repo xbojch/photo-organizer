@@ -235,12 +235,23 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
 
         if city:
             pending.append(_LocatedFile(file=f, dt=dt, city=city, kind=kind, digest=digest))
+            # Final destination (which day-range folder) isn't known until the
+            # whole scan finishes -- see _plan_located() -- so this can't log
+            # the real "-> dest" line yet. Log something anyway: without it,
+            # the log pane goes silent for every located file (often most of
+            # the library) and the run looks hung until it finishes or is
+            # cancelled, at which point _plan_located() logs everything
+            # deferred in one sudden burst.
+            reporter.log(f'[{kind}] {f} -> (queued: {city}, folder decided after full scan)', 'dim')
         else:
             year_root = _year_root(out_dir, kind, dt.year)
             dest_folder = year_root if kind is MediaKind.VIDEO else year_root / f'{dt:%m}'
             plan.append(_finalize(f, dest_folder, kind, digest, used_dests, reporter))
         reporter.set_progress(i)
 
+    if pending:
+        reporter.log(f'Resolving {len(pending)} queued location-grouped files into date-range folders...',
+                      'dim')
     plan.extend(_plan_located(pending, out_dir, used_dests, reporter))
 
     reporter.log('')
