@@ -26,7 +26,7 @@ import subprocess  # nosec B404 -- only ever invoked with a fixed, user-configur
 from datetime import datetime
 from pathlib import Path
 
-from .dates import HAS_PIL, PIL_READABLE, _date_from_pil_exif, parse_exif_datetime
+from .dates import CREATE_NO_WINDOW, HAS_PIL, PIL_READABLE, _date_from_pil_exif, parse_exif_datetime
 from .gps import NULL_ISLAND, _gps_from_pil_exif
 from .models import DateSource
 
@@ -47,7 +47,7 @@ def get_date_and_gps(path: Path, exiftool_path: str) -> tuple[datetime, DateSour
             proc = subprocess.run(  # nosec B603 -- exiftool_path is app-configured, args are fixed/path-only
                 [exiftool_path, '-f', '-s3', '-n', '-DateTimeOriginal', '-CreateDate',
                  '-GPSLatitude', '-GPSLongitude', str(path)],
-                capture_output=True, text=True, timeout=20,
+                capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW,
             )
             lines = (proc.stdout or '').splitlines()
             if len(lines) == 4:

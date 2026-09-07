@@ -24,7 +24,13 @@ def city_for(lat: float, lon: float) -> str | None:
         return None
     try:
         import reverse_geocoder as rg
-        result = rg.search((lat, lon))[0]
+        # mode=1 forces the single-process k-d tree query. The default
+        # (mode=2) spins up a fresh multiprocessing.Pool on *every* call --
+        # absurd overhead for looking up one coordinate at a time, and fatal
+        # in the PyInstaller --onefile --windowed build: each worker process
+        # re-executes the frozen exe from scratch, which re-opens the whole
+        # GUI window (once per CPU core, per geotagged photo).
+        result = rg.search((lat, lon), mode=1)[0]
         return result.get('name') or None
     # reverse_geocoder ships no documented exception type for lookup
     # failures; degrade to "no location" rather than aborting the run.

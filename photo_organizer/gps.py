@@ -11,7 +11,7 @@ from __future__ import annotations
 import subprocess  # nosec B404 -- only ever invoked with a fixed, user-configured exiftool path
 from pathlib import Path
 
-from .dates import HAS_PIL, PIL_READABLE
+from .dates import CREATE_NO_WINDOW, HAS_PIL, PIL_READABLE
 
 if HAS_PIL:
     from PIL import Image
@@ -48,7 +48,7 @@ def get_gps(path: Path, exiftool_path: str = '') -> tuple[float, float] | None:
             # (no separate GPS*Ref parsing needed), one line each for lat/lon.
             proc = subprocess.run(  # nosec B603 -- exiftool_path is app-configured, args are fixed/path-only
                 [exiftool_path, '-s3', '-n', '-GPSLatitude', '-GPSLongitude', str(path)],
-                capture_output=True, text=True, timeout=20,
+                capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW,
             )
             lines = [line.strip() for line in (proc.stdout or '').splitlines() if line.strip()]
             if len(lines) == 2:

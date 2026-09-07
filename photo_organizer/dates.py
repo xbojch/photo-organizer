@@ -14,6 +14,7 @@ building this. DateTimeOriginal is preferred when both are present.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess  # nosec B404 -- only ever invoked with a fixed, user-configured exiftool path, see get_file_date()
@@ -21,6 +22,13 @@ from datetime import datetime
 from pathlib import Path
 
 from .models import DateSource
+
+# exiftool is a console executable; without this, each of the hundreds/
+# thousands of per-photo subprocess.run() calls below (and in gps.py /
+# exif_lookup.py) briefly opens and focuses its own console window on
+# Windows, making the machine unusable while a scan is running. Shared here
+# so all three call sites stay in sync.
+CREATE_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
 
 try:
     from PIL import Image
@@ -80,7 +88,7 @@ def get_file_date(path: Path, exiftool_path: str = '') -> tuple[datetime, DateSo
             # only one of them resolves (see module docstring).
             proc = subprocess.run(  # nosec B603 -- exiftool_path is app-configured, args are fixed/path-only
                 [exiftool_path, '-f', '-s3', '-DateTimeOriginal', '-CreateDate', str(path)],
-                capture_output=True, text=True, timeout=20,
+                capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW,
             )
             lines = (proc.stdout or '').splitlines()
             if len(lines) == 2:
