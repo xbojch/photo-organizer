@@ -65,7 +65,7 @@ def _make_file(path: Path, content: bytes = b'', mtime: datetime | None = None) 
 
 # ---- analyze(): categorization + dating ----
 
-def test_analyze_plans_a_photo_by_mtime_year_month(tmp_path):
+def test_analyze_plans_a_photo_by_mtime_into_a_day_folder(tmp_path):
     in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
     _make_file(in_dir / 'a.jpg', b'photo-data', mtime=datetime(2020, 6, 15, 12, 0, 0))
 
@@ -74,7 +74,7 @@ def test_analyze_plans_a_photo_by_mtime_year_month(tmp_path):
 
     assert len(plan) == 1
     assert plan[0].kind == MediaKind.PHOTO
-    assert plan[0].dest == out_dir / '2020' / '06' / 'a.jpg'
+    assert plan[0].dest == out_dir / '2020' / '06' / '2020-06-15' / 'a.jpg'
     assert reporter.has_log_containing('Photos using mtime   : 1')
 
 
@@ -90,11 +90,11 @@ def test_analyze_plans_a_photo_by_exif_date(tmp_path, monkeypatch):
     reporter = FakeReporter()
     plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='exiftool', reporter=reporter)
 
-    assert plan[0].dest == out_dir / '2017' / '04' / 'a.jpg'
+    assert plan[0].dest == out_dir / '2017' / '04' / '2017-04-09' / 'a.jpg'
     assert reporter.has_log_containing('Photos using EXIF    : 1')
 
 
-def test_analyze_plans_a_video_by_mtime_year(tmp_path):
+def test_analyze_plans_a_video_by_mtime_into_a_day_folder(tmp_path):
     in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
     _make_file(in_dir / 'a.mp4', b'video-data', mtime=datetime(2021, 1, 1, 0, 0, 0))
 
@@ -102,7 +102,7 @@ def test_analyze_plans_a_video_by_mtime_year(tmp_path):
 
     assert len(plan) == 1
     assert plan[0].kind == MediaKind.VIDEO
-    assert plan[0].dest == out_dir / 'videos' / '2021' / 'a.mp4'
+    assert plan[0].dest == out_dir / '2021' / '01' / '2021-01-01' / 'a.mp4'
 
 
 def test_analyze_skips_unrecognized_extensions(tmp_path):
@@ -375,7 +375,7 @@ def test_analyze_ignores_location_by_default(tmp_path, monkeypatch):
     plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
 
     assert calls == []  # get_date_and_gps never invoked when group_by_location is False (the default)
-    assert plan[0].dest == out_dir / '2015' / '04' / 'a.jpg'
+    assert plan[0].dest == out_dir / '2015' / '04' / '2015-04-28' / 'a.jpg'
 
 
 def test_analyze_falls_back_to_plain_bucket_when_city_not_found(tmp_path, monkeypatch):
@@ -387,7 +387,7 @@ def test_analyze_falls_back_to_plain_bucket_when_city_not_found(tmp_path, monkey
     plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', group_by_location=True,
                     reporter=FakeReporter())
 
-    assert plan[0].dest == out_dir / '2015' / '04' / 'a.jpg'
+    assert plan[0].dest == out_dir / '2015' / '04' / '2015-04-28' / 'a.jpg'
 
 
 def test_analyze_groups_a_single_located_day_as_yyyy_mm_dd_city(tmp_path, monkeypatch):
@@ -415,7 +415,7 @@ def test_analyze_excludes_a_named_location_to_the_plain_bucket(tmp_path, monkeyp
                     excluded_locations=frozenset({'Warsaw'}), reporter=FakeReporter())
 
     assert len(plan) == 1
-    assert plan[0].dest == out_dir / '2015' / '04' / 'a.jpg'
+    assert plan[0].dest == out_dir / '2015' / '04' / '2015-04-28' / 'a.jpg'
 
 
 def test_analyze_excludes_a_location_case_insensitively(tmp_path, monkeypatch):
@@ -428,7 +428,7 @@ def test_analyze_excludes_a_location_case_insensitively(tmp_path, monkeypatch):
     plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', group_by_location=True,
                     excluded_locations=frozenset({'warsaw'}), reporter=FakeReporter())
 
-    assert plan[0].dest == out_dir / '2015' / '04' / 'a.jpg'
+    assert plan[0].dest == out_dir / '2015' / '04' / '2015-04-28' / 'a.jpg'
 
 
 def test_analyze_only_excludes_the_named_location(tmp_path, monkeypatch):
@@ -478,7 +478,7 @@ def test_analyze_splits_the_range_at_a_day_with_no_located_photo(tmp_path, monke
     }
 
 
-def test_analyze_keeps_video_and_photo_location_folders_separate(tmp_path, monkeypatch):
+def test_analyze_puts_video_and_photo_in_the_same_location_folder(tmp_path, monkeypatch):
     in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
     _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
     _make_file(in_dir / 'a.mp4', b'2', mtime=datetime(2015, 4, 28))
@@ -491,7 +491,31 @@ def test_analyze_keeps_video_and_photo_location_folders_separate(tmp_path, monke
 
     dests = {op.kind: op.dest for op in plan}
     assert dests[MediaKind.PHOTO] == out_dir / '2015' / '04' / '2015-04-28 Warsaw' / 'a.jpg'
-    assert dests[MediaKind.VIDEO] == out_dir / 'videos' / '2015' / '04' / '2015-04-28 Warsaw' / 'a.mp4'
+    assert dests[MediaKind.VIDEO] == out_dir / '2015' / '04' / '2015-04-28 Warsaw' / 'a.mp4'
+
+
+def test_analyze_puts_unlocated_video_and_photo_in_the_same_day_folder(tmp_path):
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 12, 10))
+    _make_file(in_dir / 'b.mp4', b'2', mtime=datetime(2015, 4, 12, 18))
+
+    plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+
+    assert {op.dest.parent for op in plan} == {out_dir / '2015' / '04' / '2015-04-12'}
+
+
+def test_analyze_merges_a_located_photo_day_and_video_day_into_one_range(tmp_path, monkeypatch):
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 15))
+    _make_file(in_dir / 'b.mp4', b'2', mtime=datetime(2015, 4, 16))
+
+    _stub_location(monkeypatch, default_gps=(52.23, 21.01))
+    monkeypatch.setattr('photo_organizer.planner.city_for', lambda lat, lon: 'Warsaw')
+
+    plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', group_by_location=True,
+                    reporter=FakeReporter())
+
+    assert {op.dest.parent for op in plan} == {out_dir / '2015' / '04' / '2015-04-15-16 Warsaw'}
 
 
 def test_analyze_logs_grouped_by_location_count(tmp_path, monkeypatch):

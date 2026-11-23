@@ -9,14 +9,18 @@ the sibling [`video-organizer`](../video-organizer) project.
 ```
 <OUTPUT>/
 ├── 2019/
-│   ├── 03/<photos taken March 2019>
-│   └── 07/<photos taken July 2019>
-├── 2020/
-│   └── 12/...
-└── videos/
-    ├── 2019/<videos from 2019>
-    └── 2020/<videos from 2020>
+│   ├── 03/
+│   │   ├── 2019-03-02/<photos + videos from Mar 2, 2019>
+│   │   └── 2019-03-17/...
+│   └── 07/
+│       └── 2019-07-04/...
+└── 2020/
+    └── 12/
+        └── 2020-12-24/...
 ```
+
+Photos and videos share the same day folders, so everything from one day
+(or one trip, see below) is in one place.
 
 Date comes from EXIF `DateTimeOriginal` (or `CreateDate` for videos, which
 don't carry `DateTimeOriginal`) when available, otherwise the file's
@@ -43,11 +47,11 @@ Consecutive days at the same city are merged into one range folder, so a
 `2015-04-15-18 Warsaw` folder instead of four separate day folders; a day
 with a gap in it (no located photo) splits the range. Files with no
 resolvable GPS — most of a typical library — fall back to the plain
-`YYYY/MM` bucket:
+`YYYY-MM-DD` day folder:
 
 ```
 <OUTPUT>/2015/04/
-├── 12/<photos from Apr 12, no GPS>
+├── 2015-04-12/<photos + videos from Apr 12, no GPS>
 ├── 2015-04-15-18 Warsaw/<a 4-day trip, located every day>
 └── 2015-04-25 Warsaw/<a single located day>
 ```

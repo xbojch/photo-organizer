@@ -68,10 +68,10 @@ def _scan_files(in_dir: Path, out_dir: Path) -> list[Path]:
     return files
 
 
-def _year_root(out_dir: Path, kind: MediaKind, year: int) -> Path:
-    """<out_dir>/videos/YYYY for videos, <out_dir>/YYYY for photos -- shared
-    by analyze()'s plain-bucket branch and _plan_located()."""
-    return out_dir / 'videos' / f'{year:04d}' if kind is MediaKind.VIDEO else out_dir / f'{year:04d}'
+def _year_root(out_dir: Path, year: int) -> Path:
+    """<out_dir>/YYYY -- photos and videos share one tree. Shared by
+    analyze()'s plain day-folder branch and _plan_located()."""
+    return out_dir / f'{year:04d}'
 
 
 def _finalize(src: Path, dest_folder: Path, kind: MediaKind, digest: str,
@@ -111,22 +111,24 @@ def _plan_located(pending: list[_LocatedFile], out_dir: Path, used_dests: set[st
     scan) because a day only joins a range once every day in it is known
     to have a located photo -- that isn't knowable until the whole folder
     has been scanned."""
-    groups: dict[tuple[MediaKind, int, int, str], list[_LocatedFile]] = defaultdict(list)
+    # Photos and videos are grouped together: a same-city video can share a
+    # photo's folder, and fill a day gap in a trip's range.
+    groups: dict[tuple[int, int, str], list[_LocatedFile]] = defaultdict(list)
     for p in pending:
-        groups[(p.kind, p.dt.year, p.dt.month, p.city)].append(p)
+        groups[(p.dt.year, p.dt.month, p.city)].append(p)
 
     ops: list[PlanOperation] = []
-    for (kind, year, month, city), items in sorted(groups.items(), key=lambda kv: kv[0]):
+    for (year, month, city), items in sorted(groups.items(), key=lambda kv: kv[0]):
         runs = _consecutive_day_runs(sorted({p.dt.day for p in items}))
         for start_day, end_day in runs:
             label = (f'{year:04d}-{month:02d}-{start_day:02d}' if start_day == end_day
                       else f'{year:04d}-{month:02d}-{start_day:02d}-{end_day:02d}')
             # city is already sanitize_component()-cleaned (see analyze()); label
             # is digits/hyphens only -- concatenating them needs no re-sanitizing.
-            dest_folder = _year_root(out_dir, kind, year) / f'{month:02d}' / f'{label} {city}'
+            dest_folder = _year_root(out_dir, year) / f'{month:02d}' / f'{label} {city}'
             for p in items:
                 if start_day <= p.dt.day <= end_day:
-                    ops.append(_finalize(p.file, dest_folder, kind, p.digest, used_dests, reporter))
+                    ops.append(_finalize(p.file, dest_folder, p.kind, p.digest, used_dests, reporter))
     return ops
 
 
@@ -143,9 +145,8 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
     merged into one range folder (see there) -- unless that city is in
     excluded_locations (matched case-insensitively), typically the user's
     home town: photos taken there aren't a "trip" worth its own folder, so
-    they fall straight into the plain year/month bucket instead, same as a
-    file with no resolvable GPS at all. Files without resolvable GPS go
-    straight into the plain year/month bucket, as before.
+    they fall straight into a plain "YYYY/MM/YYYY-MM-DD" day folder instead,
+    same as a file with no resolvable GPS at all.
     """
     plan: list[PlanOperation] = []
     pending: list[_LocatedFile] = []  # resolved after the scan by _plan_located()
@@ -256,8 +257,9 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
             # deferred in one sudden burst.
             reporter.log(f'[{kind}] {f} -> (queued: {city}, folder decided after full scan)', 'dim')
         else:
-            year_root = _year_root(out_dir, kind, dt.year)
-            dest_folder = year_root if kind is MediaKind.VIDEO else year_root / f'{dt:%m}'
+            # Plain day folder (no city) -- same YYYY/MM depth as the located
+            # folders, for photos and videos alike.
+            dest_folder = _year_root(out_dir, dt.year) / f'{dt:%m}' / f'{dt:%Y-%m-%d}'
             plan.append(_finalize(f, dest_folder, kind, digest, used_dests, reporter))
         reporter.set_progress(i)
 
