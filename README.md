@@ -125,11 +125,32 @@ push code to GitHub.
 4. Keep **"Dry run"** ticked and press **Analyze / Plan**.
 5. Read the log — every planned operation is listed, plus a summary
    (EXIF vs. mtime counts, duplicates, unrecognized files).
-6. When happy, untick **"Dry run"**, click **Analyze** again, then **Apply**.
+6. When happy, untick **"Dry run"** and click **Apply**. The plan you just
+   reviewed is used as is, so there's no second Analyze.
 
-Nothing touches disk while "Dry run" is on — Apply refuses to run until you
-untick it and re-analyze. There's a Cancel button, and log/plan can be
-saved to a file from the button row.
+No photo is copied or moved while "Dry run" is on — Apply refuses to run
+until you untick it. If you change the folders, the exiftool path or the
+location options after analyzing, Apply asks you to analyze again so the
+plan matches. Switching between Copy and Move doesn't need a new plan.
+There's a Cancel button, and log/plan can be saved to a file from the
+button row.
+
+### Re-running on a large library
+
+Analyze remembers what it worked out about each input file (its hash,
+date and GPS) in `<OUTPUT>/scan_cache.json`, keyed by the file's path,
+size and modified time. On the next Analyze, every unchanged file is
+reused from there without being read, so only new or changed files cost
+time. The first scan of a big library still reads every file once. The
+cache is written during dry runs too, and saved every few minutes while a
+long scan runs, so cancelling or closing the app mid-scan keeps what was
+done so far. The summary shows how many files were reused.
+
+Deleting `scan_cache.json` is always safe; the next Analyze just reads
+everything again.
+
+When exiftool is available, one exiftool process stays running for the
+whole scan instead of starting a new one for every file.
 
 ---
 

@@ -22,11 +22,11 @@ open and EXIF-decode the same file again).
 """
 from __future__ import annotations
 
-import subprocess  # nosec B404 -- only ever invoked with a fixed, user-configured exiftool path
 from datetime import datetime
 from pathlib import Path
 
-from .dates import CREATE_NO_WINDOW, HAS_PIL, PIL_READABLE, _date_from_pil_exif, parse_exif_datetime
+from .dates import HAS_PIL, PIL_READABLE, _date_from_pil_exif, parse_exif_datetime
+from .exiftool import run_exiftool
 from .gps import NULL_ISLAND, _gps_from_pil_exif
 from .models import DateSource
 
@@ -43,30 +43,24 @@ def get_date_and_gps(path: Path, exiftool_path: str) -> tuple[datetime, DateSour
     gps: tuple[float, float] | None = None
 
     if exiftool_path:
-        try:
-            proc = subprocess.run(  # nosec B603 -- exiftool_path is app-configured, args are fixed/path-only
-                [exiftool_path, '-f', '-s3', '-n', '-DateTimeOriginal', '-CreateDate',
-                 '-GPSLatitude', '-GPSLongitude', str(path)],
-                capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW,
-            )
-            lines = (proc.stdout or '').splitlines()
-            if len(lines) == 4:
-                orig_raw, created_raw, lat_raw, lon_raw = (line.strip() for line in lines)
-                for date_raw in (orig_raw, created_raw):
-                    if date_raw not in _MISSING:
-                        parsed = parse_exif_datetime(date_raw)
-                        if parsed:
-                            dt, source = parsed, DateSource.EXIF
-                            break
-                if lat_raw not in _MISSING and lon_raw not in _MISSING:
-                    try:
-                        coords = float(lat_raw), float(lon_raw)
-                        if coords != NULL_ISLAND:
-                            gps = coords
-                    except ValueError:
-                        pass
-        except (OSError, subprocess.SubprocessError):
-            pass
+        out = run_exiftool(exiftool_path, ['-f', '-s3', '-n', '-DateTimeOriginal', '-CreateDate',
+                                           '-GPSLatitude', '-GPSLongitude', str(path)])
+        lines = (out or '').splitlines()
+        if len(lines) == 4:
+            orig_raw, created_raw, lat_raw, lon_raw = (line.strip() for line in lines)
+            for date_raw in (orig_raw, created_raw):
+                if date_raw not in _MISSING:
+                    parsed = parse_exif_datetime(date_raw)
+                    if parsed:
+                        dt, source = parsed, DateSource.EXIF
+                        break
+            if lat_raw not in _MISSING and lon_raw not in _MISSING:
+                try:
+                    coords = float(lat_raw), float(lon_raw)
+                    if coords != NULL_ISLAND:
+                        gps = coords
+                except ValueError:
+                    pass
 
     if (dt is None or gps is None) and HAS_PIL and path.suffix.lower() in PIL_READABLE:
         try:

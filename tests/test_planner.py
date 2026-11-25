@@ -5,6 +5,7 @@ split.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 from datetime import datetime
@@ -666,3 +667,158 @@ def test_rebuild_hash_index_lets_analyze_recognize_a_pre_existing_output_file_as
 
     assert plan == []  # recognized as a duplicate, not copied in under a new name
     assert reporter.has_log_containing('[Duplicate]', tag='warn')
+
+
+# ---- analyze(): scan cache (scan_cache.json) ----
+
+def _count_hashing(monkeypatch) -> list[Path]:
+    """Wrap planner.hash_file so a test can see which files were actually read."""
+    hashed: list[Path] = []
+
+    def counting(path):
+        hashed.append(path)
+        return hash_file(path)
+
+    monkeypatch.setattr('photo_organizer.planner.hash_file', counting)
+    return hashed
+
+
+def test_analyze_reuses_the_scan_cache_for_unchanged_files(tmp_path, monkeypatch):
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
+    _make_file(in_dir / 'b.mp4', b'2', mtime=datetime(2015, 4, 29))
+    hashed = _count_hashing(monkeypatch)
+
+    first = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+    assert len(hashed) == 2
+    assert (out_dir / 'scan_cache.json').exists()  # written by a plain (dry-run) Analyze
+
+    hashed.clear()
+    reporter = FakeReporter()
+    second = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=reporter)
+
+    assert hashed == []  # nothing re-read
+    assert [(op.src, op.dest, op.hash) for op in second] == [(op.src, op.dest, op.hash) for op in first]
+    assert reporter.has_log_containing('Reused from cache    : 2')
+
+
+def test_analyze_rereads_a_file_that_changed_since_the_last_scan(tmp_path, monkeypatch):
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
+    _make_file(in_dir / 'b.jpg', b'2', mtime=datetime(2015, 4, 28))
+    analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+
+    _make_file(in_dir / 'b.jpg', b'edited', mtime=datetime(2016, 1, 2))
+    hashed = _count_hashing(monkeypatch)
+    plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+
+    assert hashed == [in_dir / 'b.jpg']
+    dests = {op.src.name: op.dest for op in plan}
+    assert dests['b.jpg'] == out_dir / '2016' / '01' / '2016-01-02' / 'b.jpg'  # new date, not the cached one
+    assert {op.hash for op in plan if op.src.name == 'b.jpg'} == {hashlib.sha256(b'edited').hexdigest()}
+
+
+def test_analyze_reads_gps_for_cached_files_when_location_grouping_is_switched_on(tmp_path, monkeypatch):
+    # The hash is still reused, but the GPS was never looked up the first
+    # time (grouping was off), so it has to be read now.
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
+    analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+
+    hashed = _count_hashing(monkeypatch)
+    calls: list[Path] = []
+    _stub_location(monkeypatch, default_gps=(52.23, 21.01), track_calls=calls)
+    monkeypatch.setattr('photo_organizer.planner.city_for', lambda lat, lon: 'Warsaw')
+    plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', group_by_location=True,
+                    reporter=FakeReporter())
+
+    assert hashed == []
+    assert calls == [in_dir / 'a.jpg']
+    assert plan[0].dest == out_dir / '2015' / '04' / '2015-04-28 Warsaw' / 'a.jpg'
+
+    # ...and a third scan with grouping still on reuses the GPS too.
+    calls.clear()
+    plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', group_by_location=True,
+                    reporter=FakeReporter())
+    assert calls == []
+    assert plan[0].dest == out_dir / '2015' / '04' / '2015-04-28 Warsaw' / 'a.jpg'
+
+
+def test_analyze_rereads_dates_once_exiftool_is_configured(tmp_path, monkeypatch):
+    # Files first scanned without exiftool only got Pillow/mtime dates;
+    # configuring exiftool later must give them a chance at a real one.
+    from photo_organizer.models import DateSource
+
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2020, 6, 15))
+    analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+
+    hashed = _count_hashing(monkeypatch)
+    monkeypatch.setattr('photo_organizer.planner.get_file_date',
+                         lambda path, exiftool_path: (datetime(2017, 4, 9), DateSource.EXIF))
+    monkeypatch.setattr('photo_organizer.planner.exiftool_session', lambda path: contextlib.nullcontext())
+    plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='exiftool', reporter=FakeReporter())
+
+    assert hashed == []
+    assert plan[0].dest == out_dir / '2017' / '04' / '2017-04-09' / 'a.jpg'
+
+
+def test_analyze_forgets_files_that_left_the_input_folder(tmp_path):
+    from photo_organizer.scan_cache import ScanCache
+
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
+    _make_file(in_dir / 'b.jpg', b'2', mtime=datetime(2015, 4, 28))
+    analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+
+    (in_dir / 'b.jpg').unlink()  # e.g. moved out by a previous Apply
+    analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+
+    cache = ScanCache(out_dir)
+    cache.load()
+    assert len(cache) == 1
+
+
+def test_analyze_keeps_the_cache_of_another_input_folder(tmp_path):
+    from photo_organizer.scan_cache import ScanCache
+
+    in_a, in_b, out_dir = tmp_path / 'in_a', tmp_path / 'in_b', tmp_path / 'out'
+    _make_file(in_a / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
+    _make_file(in_b / 'b.jpg', b'2', mtime=datetime(2015, 4, 28))
+    analyze(in_dir=in_a, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+    analyze(in_dir=in_b, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+
+    cache = ScanCache(out_dir)
+    cache.load()
+    assert len(cache) == 2
+
+
+def test_analyze_saves_the_cache_of_a_cancelled_scan(tmp_path, monkeypatch):
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    for name in ('a.jpg', 'b.jpg', 'c.jpg'):
+        _make_file(in_dir / name, name.encode(), mtime=datetime(2015, 4, 28))
+
+    analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter(stop_after=3))
+
+    hashed = _count_hashing(monkeypatch)
+    analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+    assert hashed == [in_dir / 'c.jpg']  # a.jpg and b.jpg were done before the cancel
+
+
+def test_analyze_ignores_a_corrupt_scan_cache(tmp_path):
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
+    _make_file(out_dir / 'scan_cache.json', b'{not json')
+
+    plan = analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+
+    assert plan[0].dest == out_dir / '2015' / '04' / '2015-04-28' / 'a.jpg'
+
+
+def test_rebuild_hash_index_does_not_index_the_scan_cache(tmp_path):
+    in_dir, out_dir = tmp_path / 'in', tmp_path / 'out'
+    _make_file(in_dir / 'a.jpg', b'1', mtime=datetime(2015, 4, 28))
+    analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path='', reporter=FakeReporter())
+    assert (out_dir / 'scan_cache.json').exists()
+
+    assert rebuild_hash_index(out_dir, reporter=FakeReporter()) == 0

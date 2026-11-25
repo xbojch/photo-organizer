@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,13 +19,20 @@ from typing import Protocol
 
 from .dates import get_file_date
 from .exif_lookup import get_date_and_gps
+from .exiftool import exiftool_session
 from .geocoding import city_for
 from .hashdb import HashDb, hash_file
 from .models import DateSource, LogTag, MediaKind, Operation, PlanOperation
 from .paths import sanitize_component, unique_dest
+from .scan_cache import FILENAME as SCAN_CACHE_FILENAME
+from .scan_cache import CachedScan, ScanCache
 
 PHOTO_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.heic', '.gif', '.tiff'}
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.3gp'}
+
+# How often a long scan saves its progress to scan_cache.json, so a crash or
+# a closed window hours into a big library doesn't lose everything.
+CACHE_SAVE_INTERVAL_SECONDS = 300
 
 
 @dataclass
@@ -136,9 +144,13 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
             excluded_locations: frozenset[str] = frozenset(),
             reporter: ProgressReporter) -> list[PlanOperation]:
     """Scan in_dir, detect photo/video + date (+ location, if enabled),
-    dedupe by hash, and build the copy/move plan. Never touches the
-    filesystem beyond reading it -- see apply_plan() for the part that
-    actually copies/moves files.
+    dedupe by hash, and build the copy/move plan. Never copies or moves
+    anything -- see apply_plan() for that. The only thing it writes is
+    <out_dir>/scan_cache.json (see scan_cache.py), so the next scan only
+    has to read new or changed input files.
+
+    All exiftool lookups go through one long-running exiftool process for
+    the whole scan (see exiftool.py) instead of a new process per file.
 
     With group_by_location, a file whose GPS EXIF resolves to a city is
     deferred to _plan_located() so consecutive same-city days can be
@@ -148,6 +160,46 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
     they fall straight into a plain "YYYY/MM/YYYY-MM-DD" day folder instead,
     same as a file with no resolvable GPS at all.
     """
+    with exiftool_session(exiftool_path):
+        return _analyze(in_dir=in_dir, out_dir=out_dir, exiftool_path=exiftool_path,
+                        group_by_location=group_by_location, excluded_locations=excluded_locations,
+                        reporter=reporter)
+
+
+def _scan_file(f: Path, st: os.stat_result, cache: ScanCache, *, exiftool_path: str,
+               group_by_location: bool) -> tuple[CachedScan, bool]:
+    """Hash + date (+ GPS) for one input file, reusing the scan cache where
+    it still applies. Returns (scan, came_from_cache). Raises OSError if the
+    file can't be read."""
+    cached = cache.get(f, st)
+    if cached and (cached.exiftool or not exiftool_path) and (cached.gps_read or not group_by_location):
+        return cached, True
+
+    # The hash is still valid even when the date/GPS must be re-read: e.g.
+    # "Group by location" was just switched on, or exiftool was configured
+    # since the last scan.
+    digest = cached.hash if cached else hash_file(f)
+    if group_by_location:
+        # One exiftool call for date + GPS instead of two -- see exif_lookup.py.
+        dt, source, gps = get_date_and_gps(f, exiftool_path)
+    else:
+        dt, source = get_file_date(f, exiftool_path)
+        gps = None
+    scan = CachedScan(hash=digest, date=dt, source=source, gps=gps,
+                      gps_read=group_by_location, exiftool=bool(exiftool_path))
+    cache.put(f, st, scan)
+    return scan, False
+
+
+def _save_cache(cache: ScanCache, reporter: ProgressReporter) -> None:
+    try:
+        cache.save()
+    except OSError as e:
+        reporter.log(f'[Warning] Could not save scan cache {cache.path}: {e}', 'warn')
+
+
+def _analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_location: bool,
+             excluded_locations: frozenset[str], reporter: ProgressReporter) -> list[PlanOperation]:
     plan: list[PlanOperation] = []
     pending: list[_LocatedFile] = []  # resolved after the scan by _plan_located()
     excluded_cf = {loc.casefold() for loc in excluded_locations}
@@ -165,6 +217,10 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
     hash_db.load()
     if hash_db.data:
         reporter.log(f'Loaded {len(hash_db.data)} known hashes from {hash_db.path}', 'dim')
+    cache = ScanCache(out_dir)
+    cache.load()
+    if len(cache):
+        reporter.log(f'Loaded {len(cache)} previously scanned files from {cache.path}', 'dim')
 
     reporter.set_status('Scanning...')
     files = _scan_files(in_dir, out_dir)
@@ -177,11 +233,19 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
     used_dests: set[str] = set()
     seen_hashes = set(hash_db.data.keys())
     total = exif_used = mtime_used = videos = duplicates = unrecognized = located = excluded = 0
+    from_cache = 0
+    seen_paths: set[str] = set()
+    cancelled = False
+    last_save = time.monotonic()
 
     for i, f in enumerate(files, 1):
         if reporter.should_stop():
             reporter.log('Cancelled.', 'warn')
+            cancelled = True
             break
+        if time.monotonic() - last_save > CACHE_SAVE_INTERVAL_SECONDS:
+            _save_cache(cache, reporter)
+            last_save = time.monotonic()
         reporter.set_status(f'Scanning {i}/{len(files)}: {f.name}')
         total += 1
         ext = f.suffix.lower()
@@ -197,25 +261,24 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
             reporter.set_progress(i)
             continue
 
-        if group_by_location:
-            # One exiftool call for date + GPS instead of two -- see exif_lookup.py.
-            dt, source, gps = get_date_and_gps(f, exiftool_path)
-        else:
-            dt, source = get_file_date(f, exiftool_path)
-            gps = None
+        try:
+            st = f.stat()
+            scan, cache_hit = _scan_file(f, st, cache, exiftool_path=exiftool_path,
+                                         group_by_location=group_by_location)
+        except OSError as e:
+            reporter.log(f'[Error] Could not read {f}: {e}', 'err')
+            reporter.set_progress(i)
+            continue
+        seen_paths.add(str(f.absolute()))
+        from_cache += cache_hit
+        digest, dt, source = scan.hash, scan.date, scan.source
+        gps = scan.gps if group_by_location else None
 
         if kind is MediaKind.PHOTO:
             if source == DateSource.EXIF:
                 exif_used += 1
             else:
                 mtime_used += 1
-
-        try:
-            digest = hash_file(f)
-        except OSError as e:
-            reporter.log(f'[Error] Could not read {f}: {e}', 'err')
-            reporter.set_progress(i)
-            continue
 
         if digest in seen_hashes:
             reporter.log(f'[Duplicate] {f}', 'warn')
@@ -268,9 +331,17 @@ def analyze(*, in_dir: Path, out_dir: Path, exiftool_path: str, group_by_locatio
                       'dim')
     plan.extend(_plan_located(pending, out_dir, used_dests, reporter))
 
+    # Forget files that left in_dir since the last scan (moved by a previous
+    # Apply, deleted, renamed) -- only after a complete scan, since a
+    # cancelled one hasn't seen everything that's still there.
+    if not cancelled:
+        cache.prune(in_dir, seen_paths)
+    _save_cache(cache, reporter)
+
     reporter.log('')
     reporter.log('============= Summary =============', 'h')
     reporter.log(f'Total files scanned  : {total}')
+    reporter.log(f'Reused from cache    : {from_cache}  (unchanged since the last scan, not re-read)')
     reporter.log(f'Duplicates skipped   : {duplicates}')
     reporter.log(f'Photos using EXIF    : {exif_used}')
     reporter.log(f'Photos using mtime   : {mtime_used}')
@@ -311,7 +382,9 @@ def rebuild_hash_index(out_dir: Path, reporter: ProgressReporter) -> int:
         reporter.set_status('Nothing to index.')
         return 0
 
-    files = sorted(p for p in out_dir.rglob('*') if p.is_file() and p.name != 'hashes.json')
+    # The tool's own bookkeeping files aren't photos -- don't index them.
+    own_files = {'hashes.json', SCAN_CACHE_FILENAME, SCAN_CACHE_FILENAME + '.tmp'}
+    files = sorted(p for p in out_dir.rglob('*') if p.is_file() and p.name not in own_files)
     reporter.log(f'Found {len(files)} existing files.')
     reporter.set_progress(0, len(files))
 

@@ -8,10 +8,10 @@ name.
 """
 from __future__ import annotations
 
-import subprocess  # nosec B404 -- only ever invoked with a fixed, user-configured exiftool path
 from pathlib import Path
 
-from .dates import CREATE_NO_WINDOW, HAS_PIL, PIL_READABLE
+from .dates import HAS_PIL, PIL_READABLE
+from .exiftool import run_exiftool
 
 if HAS_PIL:
     from PIL import Image
@@ -43,20 +43,17 @@ def _gps_from_pil_exif(exif) -> tuple[float, float] | None:
 def get_gps(path: Path, exiftool_path: str = '') -> tuple[float, float] | None:
     """Return (lat, lon) in decimal degrees, or None if the file has no GPS EXIF."""
     if exiftool_path:
-        try:
-            # -n on the Composite GPS tags yields signed decimal degrees directly
-            # (no separate GPS*Ref parsing needed), one line each for lat/lon.
-            proc = subprocess.run(  # nosec B603 -- exiftool_path is app-configured, args are fixed/path-only
-                [exiftool_path, '-s3', '-n', '-GPSLatitude', '-GPSLongitude', str(path)],
-                capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW,
-            )
-            lines = [line.strip() for line in (proc.stdout or '').splitlines() if line.strip()]
-            if len(lines) == 2:
+        # -n on the Composite GPS tags yields signed decimal degrees directly
+        # (no separate GPS*Ref parsing needed), one line each for lat/lon.
+        out = run_exiftool(exiftool_path, ['-s3', '-n', '-GPSLatitude', '-GPSLongitude', str(path)])
+        lines = [line.strip() for line in (out or '').splitlines() if line.strip()]
+        if len(lines) == 2:
+            try:
                 coords = float(lines[0]), float(lines[1])
                 if coords != NULL_ISLAND:
                     return coords
-        except (OSError, subprocess.SubprocessError, ValueError):
-            pass
+            except ValueError:
+                pass
 
     if HAS_PIL and path.suffix.lower() in PIL_READABLE:
         try:

@@ -50,6 +50,10 @@ class PhotoOrganizerApp:
         self.exiftool_path = tk.StringVar(value=saved.exiftool_path or find_exiftool())
 
         self.plan: list[PlanOperation] = []
+        # The settings self.plan was built with -- Apply refuses if they've
+        # changed since, so a reviewed dry-run plan can be applied without
+        # re-analyzing, but never one that no longer matches the options.
+        self.plan_inputs: tuple | None = None
         self.log_queue: queue.Queue = queue.Queue()
         self.stop_flag = threading.Event()
 
@@ -66,6 +70,18 @@ class PhotoOrganizerApp:
             group_by_location=self.group_by_location.get(),
             excluded_locations=self.excluded_locations.get(),
             exiftool_path=self.exiftool_path.get(),
+        )
+
+    def _plan_inputs(self) -> tuple:
+        """Everything the plan depends on. Copy vs. Move is deliberately not
+        in here -- it only matters at Apply time, so switching it after a
+        dry run doesn't need a new plan."""
+        return (
+            self.input_dir.get().strip(),
+            self.output_dir.get().strip(),
+            self.exiftool_path.get().strip(),
+            self.group_by_location.get(),
+            parse_excluded_locations(self.excluded_locations.get()) if self.group_by_location.get() else frozenset(),
         )
 
     def _on_close(self):
@@ -267,6 +283,7 @@ class PhotoOrganizerApp:
         self._current_settings().save()
         self.stop_flag.clear()
         self.plan = []
+        self.plan_inputs = self._plan_inputs()
         self.analyze_btn.config(state='disabled')
         self.apply_btn.config(state='disabled')
         self.rebuild_index_btn.config(state='disabled')
@@ -285,7 +302,8 @@ class PhotoOrganizerApp:
             )
             if self.dry_run.get():
                 self.log('DRY RUN is ON -- Apply will refuse to run.', 'warn')
-                self.log('Review the plan, then untick "Dry run" and click Analyze again, then Apply.', 'warn')
+                self.log('Review the plan, then untick "Dry run" and click Apply -- no need to Analyze again.',
+                         'warn')
             elif self.plan:
                 self.log('Ready to Apply.', 'ok')
         except Exception as e:
@@ -304,7 +322,13 @@ class PhotoOrganizerApp:
         if not self.plan:
             messagebox.showinfo('Nothing to do', 'Run "Analyze / Plan" first.'); return
         if self.dry_run.get():
-            messagebox.showinfo('Dry run is ON', 'Dry run is enabled. Untick it, re-run Analyze, then Apply.')
+            messagebox.showinfo('Dry run is ON', 'Dry run is enabled. Untick it, then click Apply again '
+                                                 '-- the plan you just reviewed is kept.')
+            return
+        if self._plan_inputs() != self.plan_inputs:
+            messagebox.showwarning('Settings changed',
+                                   'The folders, exiftool path or location options changed since this plan '
+                                   'was made.\n\nRun "Analyze / Plan" again so the plan matches them.')
             return
         operation = Operation(self.operation.get())
         if not messagebox.askyesno('Confirm',
